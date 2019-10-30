@@ -30,14 +30,27 @@ func New(hs http.Server) *Server {
 // Workaround for https://github.com/golang/go/issues/29764.
 func (s *Server) Shutdown(ctx context.Context) error {
 	close(s.shutdown)
-	s.activeHandlersWg.Wait()
-	// TODO Why do we need this to avoid an unexpected EOF?
-	// Hunch without any investigation: when the handler function returns we
-	// haven't completely finished cleanly closing the stream, so if we don't
-	// wait for a moment Server.Shutdown will still aggresively close its
-	// connections, which will result in an EOF. Is a millisecond always enough?
-	time.Sleep(time.Millisecond)
-	return s.Server.Shutdown(ctx)
+
+	activeHandlersDone := make(chan struct{})
+
+	go func() {
+		s.activeHandlersWg.Wait()
+		activeHandlersDone <- struct{}{}
+	}()
+
+	select {
+	case <-activeHandlersDone:
+		// TODO Why do we need this to avoid an unexpected EOF?
+		// Hunch without any investigation: when the handler function returns we
+		// haven't completely finished cleanly closing the stream, so if we don't
+		// wait for a moment Server.Shutdown will still aggresively close its
+		// connections, which will result in an EOF. Is a millisecond always enough?
+		time.Sleep(time.Millisecond)
+		return s.Server.Shutdown(ctx)
+	case <-ctx.Done():
+		s.Server.Close()
+		return ctx.Err()
+	}
 }
 
 // ServeTLS keeps a reference to the listener so that it can be closed on
